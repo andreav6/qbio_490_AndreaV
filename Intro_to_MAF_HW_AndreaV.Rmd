@@ -1,0 +1,224 @@
+---
+title: "Intro to MAF"
+author: "Nicole Black, Wade Boohar"
+date: "07/17/22"
+output: pdf_document
+updated: 09/17/23
+---
+              ***Name: Andrea Velazquez***
+              ***Partner: Peyton Hall***
+
+***Deliverables***
+-Upload this R Notebook to your GitHub and submit the link to your Repo on BB.
+-Include any graphs or figures created in this assignment in the folder with your R notebook with descriptive file names.
+
+Since this is an optional partner activity, it is okay if your answers are the same as your partner’s as long as everyone understands it and could explain it in their own words if asked. Each person must individually push their code to Github. *At the top of your R Notebook, write the name of you and your partner(s) as a comment.*
+
+***Complete the following coding activity and answer any following questions as comments in your R Notebook***
+
+In MAF_Tutorial.Rmd, you looked at how to analyze mutation data in terms of clinical variables as well as mutation status. In this assignment, you will need to combine the two skills to demonstrate your understanding of categorical variables and R data structures.
+
+*Pre-Assignment*
+Load all necessary packages, read in the clinical data .csv file you have in your analysis_data folder, and instantiate the MAF_object.
+```{r}
+#set directory
+knitr::opts_knit$set(root.dir = normalizePath("/Users/andreavelazquez/Desktop/School stuff/QBIO490/qbio_490_AndreaV/analysis_data")) 
+
+#load packages
+library(maftools)
+library(TCGAbiolinks)
+library(ggplot2)
+library(BiocManager)
+library(survival)
+library(survminer)
+
+#read in csv
+clinical <- read.csv("/Users/andreavelazquez/Desktop/School stuff/QBIO490/qbio_490_AndreaV/analysis_data/brca_clinical_data.csv")
+
+#change so maf file can read
+colnames(clinical)[ colnames(clinical) == "bcr_patient_barcode" ] <- "Tumor_Sample_Barcode"
+
+#save new one
+write.csv(clinical, "/Users/andreavelazquez/Desktop/School stuff/QBIO490/qbio_490_AndreaV/analysis_data/brca_clinical_data.csv", row.names = FALSE)
+
+#maf stuff
+#code from intro to maf file!
+maf_query <- GDCquery(
+    project = "TCGA-BRCA", 
+    data.category = "Simple Nucleotide Variation", 
+    access = "open", # we only have access to somatic mutations which are open access
+    data.type = "Masked Somatic Mutation", 
+    workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking")
+
+#GDCdownload(maf_query)
+maf <- GDCprepare(maf_query)
+
+#make maf object
+maf_object <- read.maf(maf = maf, 
+                       clinicalData = clinical,
+                       isTCGA = TRUE)
+
+```
+
+
+*1*
+Choose a clinical variable (or any variable from clin_rad or clin_drug) to separate your populations into two different groups and rewrite the column or create a new column with that variable as a factor. ***Do not use age or vital_status as your clinical variable.*** Hint: if your variable is continuous, you will need to determine your own cutoffs for the different levels of the factor. If your variable is categorical and has more than two possible values, choose the two that are the most common.
+```{r}
+#Mask, compare group= Over60
+#filter out NA
+NAmask<- !is.na(maf_object@clinical.data$age_at_diagnosis)
+over60<- ifelse(maf_object@clinical.data$age_at_diagnosis>=60, T, F)
+
+#filter out and update clinical data
+#does mask on updated clinical data (no NA)
+maf_object@clinical.data<- maf_object@clinical.data[NAmask, ]
+maf_object@clinical.data$Over60<- over60
+
+#turn into factor
+maf_object@clinical.data$Over60<- factor(maf_object@clinical.data$Over60, levels= c("TRUE", "FALSE"))
+```
+
+
+*2*
+Create a co-oncoplot with the top 10-20 (you choose) most mutated genes for the two groups. Pick one that has a large discrepancy in % mutated or type of mutations between the groups and research it. 
+Research it. What is the gene used for? Can you think of any reason for the discrepancy?
+
+Gene chosen: GATA3
+- Inhibits primary breast tumor outgrowth 
+- Reduces lung metastatic burden by regulating key genes involved in metastatic breast tumor progression
+- Important regulator of T-cell development and plays an important role in endothelial cell biology
+- GATA3 promotes doxorubicin resistance by inhibiting CYB5R2-mediated iron metabolism and ferroptosis. Therefore, patients with breast cancer   who display high GATA3 expression do not benefit from doxorubicin-based NAC regimens. 
+
+Possible reason for discrepancy: GATA3 is involved in inhibiting primary breast tumor outgrowth, so an increased amount of mutations on this gene would be in accord with breast cancer patients since the cancer may alter the gene expression of this gene.
+
+sources
+https://pubmed.ncbi.nlm.nih.gov/37230023/
+https://www.ncbi.nlm.nih.gov/gene/2625#:~:text=GATA3%20binds%20to%20regulatory%20elements,in%20metastatic%20breast%20tumor%20progression.
+
+```{r}
+#get barcodes for subset
+Over60_barcode<- maf_object@clinical.data$Tumor_Sample_Barcode[over60]
+Under60_barcode<- maf_object@clinical.data$Tumor_Sample_Barcode[!over60]
+
+#make maf subsets
+Over60_maf<- subsetMaf(maf=maf_object, 
+                  tsb=Over60_barcode)
+
+Under60_maf<- subsetMaf(maf=maf_object, 
+                  tsb=Under60_barcode)
+
+#Code to change the default top 5 genes to a custom amount
+# This is directly from the source code of the coOncoplot() function
+m1.genes = getGeneSummary(Over60_maf)[1:10]
+m2.genes = getGeneSummary(Under60_maf)[1:10]
+mdt = merge(m1.genes[,.(Hugo_Symbol, MutatedSamples)], m2.genes[,.(Hugo_Symbol, MutatedSamples)], by = 'Hugo_Symbol', all = TRUE)
+mdt$MutatedSamples.x[is.na(mdt$MutatedSamples.x)] = 0
+mdt$MutatedSamples.y[is.na(mdt$MutatedSamples.y)] = 0
+mdt$max = apply(mdt[,.(MutatedSamples.x, MutatedSamples.y)], 1, max)
+mdt = mdt[order(max, decreasing = TRUE)]
+
+#plot
+coOncoplot(m1=Over60_maf, 
+           m2=Under60_maf, 
+           m1Name = "Patients diagnosed after 60 y/o",
+           m2Name = "Patients diagnosed before 60 y/o",
+           genes= mdt$Hugo_Symbol,
+           borderCol = NA)
+
+#save not working
+#ggsave("/Users/andreavelazquez/Desktop/School stuff/QBIO490/qbio_490_AndreaV/MAFHW_CoOnco_Ex2_AV.png")
+```
+
+
+*3*
+Create a contingency table with your variable and chosen gene. Run a Fisher’s Exact Test between presence of mutations for that gene and your clinical variable. Create and save a mosaic plot. Interpret the output of the Fisher’s Exact Test in terms of the odds ratio and p-value.
+
+Interpretation: If you are diagnosed after 60, you have a 1.74x chance of having no mutation than if you were diagnosed before 60. The p-value indicates that there is a significant correlation between not having a mutation in gene GATA3 and being diagnosed after 60 years old.
+
+```{r}
+#subset for patients w mutation in GATA3
+gata3_maf<- subsetMaf(maf_object, 
+                     gene= 'GATA3')
+
+#new column TF for gene mutation
+maf_object@clinical.data$GATA3<- ifelse(maf_object@clinical.data$Tumor_Sample_Barcode %in% gata3_maf@clinical.data$Tumor_Sample_Barcode, T, F)
+
+#make table
+contingency_table<- table(maf_object@clinical.data$GATA3, maf_object@clinical.data$Over60)
+contingency_table
+
+#formatting stuff
+colnames(contingency_table)= c("No Mutation", "Has Mutation")
+rownames(contingency_table)= c("Diagnosed after 60 y/o", "Diagnosed before 60 y/o")
+
+#mosaic plot
+mosaicplot(contingency_table, 
+           main="Mutation in GATA3 vs Age at diagnosis",
+           color = TRUE)
+
+#Fisher's Exact test
+gata3_over60_FET<- fisher.test(contingency_table)
+gata3_over60_FET
+```
+
+
+*4*
+Subset your maf_object based on your chosen clinical variable and create a co-lollipop plot of your chosen gene divided between the two different clinical variable possibilities. Include descriptive names on your plot.
+Do you notice any difference in terms of mutations (e.g. sites, types, number) between the two populations?
+
+A lot of mutations seem to concentrate towards the end of the gene for both patient groups (over60 and under 60 yo at diagnosis). Both have a lot of frame shift insertions and deletions. The patients diagnosed before 60 have a missense mutation at the beginning of the gene, the patients over 60 don't. There is a similar amount of the same splice site mutation and a frame shift insertion at the same site in both patient groups. 
+```{r}
+
+lollipopPlot2(m1= Over60_maf, 
+              m2= Under60_maf,
+              m1_name = "Diagnosed after 60", 
+              m2_name = "Diagnosed before 60",
+              gene="GATA3")
+
+```
+
+
+*5*
+Create your Overall_Survival_Status column and create a mafSurvival KM plot based on mutations in your chosen gene.
+Does there seem to be a difference? Hypothesize why or not based on the other analysis you did with the gene above.
+
+Yes, there seems to be a difference. The patients diagnosed after 60 seem to have a higher survival rate than those diagnosed before 60. Like interpreted in the fisher's exact test results, if you are diagnosed after 60, you have a 1.74x chance of having no mutation than if you were diagnosed before 60. GATA3 contributes to inhibiting primary breast tumor outgrowth and regulates key genes involved in metastatic breast tumor progression. So having a mutation in GATA3, which was seen most frequently on patients diagnosed before 60, may allow the cancer to progress without much resistance or inhibition to tumor growth. Causing death.
+
+Additionally, the p-value is less than 0.05, indicating that there is a significant difference in survival between the two patient groups
+```{r}
+#cleanup
+#use last contact days to if patient alive, death days to if dead
+maf_object@clinical.data$survivaltime= ifelse(maf_object@clinical.data$death_days_to== "[Not Applicable]", 
+                                              maf_object@clinical.data$last_contact_days_to, 
+                                              maf_object@clinical.data$death_days_to)
+
+#convert to numerical
+maf_object@clinical.data$survivaltime= as.numeric(maf_object@clinical.data$survivaltime)
+
+#survival status 
+maf_object@clinical.data$death_event= ifelse(maf_object@clinical.data$vital_status=="Dead", T, F)
+
+#make survival object
+survival_object= Surv(time = maf_object@clinical.data$survivaltime,
+                      event = maf_object@clinical.data$death_event)
+
+#fit
+fit_object <- survfit(survival_object ~ Over60, data = maf_object@clinical.data)
+
+#plot!
+survplot <- ggsurvplot(fit_object,
+                       pval=TRUE,
+                       ggtheme = theme(plot.margin = unit(c(1,1,1,1), "cm")),
+                       legend = c(0.8, 0.2), 
+                       legend.labs= c("Pt diagnosed after 60 y/o", "Pt diagnosed before 60 y/o"), 
+                       xlab= "Time (days)")
+
+KM_plot <- survplot$plot + theme_bw() + theme(axis.title = element_text(size=20), 
+                                              axis.text = element_text(size=16),
+                                              legend.title = element_text(size=14),
+                                              legend.text = element_text(size=12))
+
+KM_plot
+
+
+```
