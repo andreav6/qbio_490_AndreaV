@@ -1,0 +1,190 @@
+---
+title: "Intro to Transcriptomics"
+author: Nicole Black, Wade Boohar, Kayla Xu
+date: 07/17/22
+updated: 09/26/23
+---
+
+Name: Andrea Velazquez
+
+***Deliverables***
+-Upload this R Notebook to your GitHub and submit the link to your Repo on BB.
+-Include any graphs or figures created in this assignment in the folder with your R notebook with descriptive file names.
+
+Since this is an optional partner activity, it is okay if your answers are the same as your partner’s as long as everyone understands it and could explain it in their own words if asked. Each person must individually push their code to Github. *At the top of your R Notebook, write the name of you and your partner(s) as a comment.*
+
+***Complete the following coding activity and answer any following questions as comments in your R Notebook***
+
+In Transcriptomics_Tutorial.Rmd, you learned how to manipulate the SummarizedExperiment data structure, turn it into more readable dataframes, complete basic analysis using those dataframes, and performed a differential expression analysis based on age. Before saving the rna_counts, rna_clinical, and rna_genes however, we masked out any sample that was not a tumor. In this assignment, you will need to reinstantiate the rna_se object and then perform differential expression analysis based on tumor status.
+
+*Pre-Assignment*
+Use knitr function to set your working directory to your analysis_data folder in qbio_490_name.
+```{r}
+
+knitr::opts_knit$set(root.dir = normalizePath("/Users/andreavelazquez/Desktop/School stuff/QBIO490/qbio_490_AndreaV/analysis_data"))
+
+```
+
+Load all necessary packages and instantiate the rna_se object
+```{r}
+
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+#BiocManager::install("DESeq2")
+library(DESeq2)
+
+
+
+#GDCdownload(rna_query)
+
+rna_query <- GDCquery(project ="TCGA-BRCA",
+                      data.category = "Transcriptome Profiling",
+                      data.type = "Gene Expression Quantification",
+                      workflow.type = "STAR - Counts")
+
+rna_se <- GDCprepare(rna_query)
+
+```
+
+
+*1*
+Perform all data cleaning and label manipulation steps (hint: applying colnames and rownames to make the dataframes more readable) except for masking out the patient with an NA for age and the "Solid Tissue Normal" sample types.
+```{r}
+#explore rna_se
+head(rna_se)
+#str(rna_se)
+dim(rna_se@colData)
+dim(rna_se@rowRanges@elementMetadata)
+dim(rna_se@assays@data$unstranded)
+
+#colData= clnical data
+#rowranges=genes
+rna_clinical<- rna_se@colData
+rna_clinical<- as.data.frame(rna_clinical)
+
+#remove nested lists to save csv
+treatments_mask<- ifelse(colnames(rna_clinical) == "treatments", F, T)
+rna_clinical<- rna_clinical[ , treatments_mask]
+
+primary_mask<- ifelse(colnames(rna_clinical) == "primary_site", F, T)
+rna_clinical<- rna_clinical[ , primary_mask]
+
+disease_mask<- ifelse(colnames(rna_clinical) == "disease_type", F, T)
+rna_clinical<- rna_clinical[ , disease_mask]
+
+#rna_genes df
+rna_genes<- rna_se@rowRanges@elementMetadata
+rna_genes<- as.data.frame(rna_genes)
+
+#rna_counts df
+rna_counts<- rna_se@assays@data$unstranded
+rna_counts<- as.data.frame(rna_counts)
+
+#basically all tumor barcodes
+#rownames(rna_clinical)
+#clinical data
+colnames(rna_clinical)
+
+#set row name in rna_genes as gene ID
+#same for rna_counts
+#set colnames for rna_counts as the tumor codes
+rownames(rna_genes)<- rna_genes$gene_id
+rownames(rna_counts)<- rna_genes$gene_id
+colnames(rna_counts)<- rownames(rna_clinical)
+
+#didn't do this in the tutorial 
+write.csv(rna_clinical, "../brca_rna_clinical_data.csv", row.names=TRUE)
+write.csv(rna_genes, "../brca_rna_gene_data.csv", row.names=FALSE)
+write.csv(rna_counts, "../brca_rna_count_data.csv", row.names=TRUE)
+
+
+
+```
+
+
+*2*
+Determine and define your experimental design for the differential expression analysis. Control for covariance of age, gender, OR vital_status. Manipulate those columns so that they are ready for differential expression analysis (hint: what kind of variables are they? what data type are they by default? do you need to handle unknown values?)
+```{r}
+#=============================================================================
+#make masks
+#keep all non-healthy defined tissue samples. Primary solid tumor and metastatic
+definitionNA_mask<- !is.na(rna_clinical$definition)
+isTumor_mask<- ifelse(rna_clinical$definition != "Solid Tissue Normal", T, F)
+#apply masks for cleanup on rna_clinical and rna_counts
+rna_clinical<- rna_clinical[definitionNA_mask, ]
+rna_counts<- rna_counts[ , definitionNA_mask]
+rna_clinical<- rna_clinical[isTumor_mask, ]
+rna_counts<- rna_counts[ , isTumor_mask]
+
+#=============================================================================
+
+DxAgeNA_mask<- !is.na(rna_clinical$age_at_diagnosis)
+rna_clinical<- rna_clinical[DxAgeNA_mask, ]
+rna_counts<- rna_counts[ , DxAgeNA_mask]
+rna_clinical$Dx_55<- ifelse(((rna_clinical$age_at_diagnosis)/365) <= 55, T, F)
+
+
+#=============================================================================
+
+#vital status NA cleanup
+Na_mask<- !is.na(rna_clinical$vital_status)
+rna_clinical<- rna_clinical[Na_mask, ]
+rna_counts<- rna_counts[ , Na_mask]
+
+#=============================================================================
+#factorize
+rna_clinical$vital_status<- factor(rna_clinical$vital_status)
+rna_clinical$Dx_55<- factor(rna_clinical$Dx_55)
+#=============================================================================
+#filter low gene count
+lowcount_mask<- ifelse(rowSums(rna_counts) < 10, F, T)
+rna_counts<- rna_counts[lowcount_mask, ]
+rna_genes<- rna_genes[lowcount_mask, ]
+
+
+
+
+```
+
+
+*3*
+Perform the differential expression analysis, create a volcano plot, and interpret what genes from each of the 6 sections means (assuming thresholds of -log10padj = 2 and log2FoldChange = 1)
+```{r fig.height=10}
+
+#make dataset
+DSEQ_dataset <- DESeqDataSetFromMatrix(countData = rna_counts,
+                                       colData = rna_clinical,
+                                       design= ~ vital_status + Dx_55)
+
+#make object
+DSEQ_object<- DESeq(DSEQ_dataset)
+
+
+#extract results
+results <- results(DSEQ_object, format = "DataFrame", 
+                   contrast = c("Dx_55", "TRUE", "FALSE"))
+
+#=============================================================================
+#Plotting 
+
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+
+EnhancedVolcano(results,
+                lab = rownames(results),
+                x = 'log2FoldChange',
+                y = 'pvalue', 
+                ylab= "-log10(P_Value)", 
+                xlab= "log2(Fold_Change)", 
+                title = "Gene differential expression for patients diagnosed under 55 years old vs patients diagnosed after 55 years old")
+
+```
+
+top-right genes: Up regulated and statistically significant in people diagnosed before 55
+bottom-right genes: Up regulated but not statistically significant in people diagnosed before 55
+top-left genes: Down regulated and statistically significant in people diagnosed before 55
+bottom-left genes: Down regulated but not statistically significant in people diagnosed before 55
+top-middle genes: Approximately equal expression (p value under 0.05)
+bottom-middle genes: Approximate equal expression, not statistically significant
+
+Save the picture of the volcano plot (using either ggsave() or right clicking and manually downloading the image and push this .Rmd and the image to GitHub)
